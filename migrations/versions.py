@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-import database as db
+import core.database as db
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@ from agents.base import BaseAgent, get_templates_for_category
 from agents.historian import Historian
 from agents.scientist import Scientist
 from agents.llm_client import generate_text, is_real_llm_enabled, wrap_content
-import database as db
+import core.database as db
 
 
 IMPROVE_PROMPT = """You are a senior Wikipedia editor rewriting a short or low-quality article into a comprehensive, authoritative encyclopedia entry.
