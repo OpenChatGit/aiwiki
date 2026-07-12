@@ -28,28 +28,20 @@ class Coordinator(BaseAgent):
         self._track(self.name, "starting batch cycle")
         results = []
 
-        # Batch 1: Review up to 5 external submissions
-        reviewed = self._review_external_submissions(batch_size=5)
+        # Do one of each per cycle — 3x faster than before, avoids SQLite lock contention
+        reviewed = self._review_external_submissions(batch_size=1)
         results.extend(reviewed)
 
-        # Small delay between batches to let SQLite breathe
-        import time
-        time.sleep(2)
-
-        # Batch 2: Improve up to 3 low-quality articles
-        improved = self._improve_low_quality(batch_size=3)
+        improved = self._improve_low_quality(batch_size=1)
         results.extend(improved)
 
-        time.sleep(2)
-
-        # Batch 3: Create up to 2 new articles from pending topics
-        created = self._create_from_pending(batch_size=2)
+        created = self._create_from_pending(batch_size=1)
         results.extend(created)
 
         self._track(self.name, f"batch complete: {len(results)} actions")
         return {"action": "batch", "results": results, "count": len(results)}
 
-    def _review_external_submissions(self, batch_size: int = 10) -> list[dict]:
+    def _review_external_submissions(self, batch_size: int = 5) -> list[dict]:
         """Review up to batch_size external agent submissions."""
         results = []
         pending = db.get_articles_needing_review()
@@ -87,7 +79,7 @@ class Coordinator(BaseAgent):
 
         return results
 
-    def _improve_low_quality(self, batch_size: int = 5) -> list[dict]:
+    def _improve_low_quality(self, batch_size: int = 3) -> list[dict]:
         """Improve up to batch_size low-quality articles."""
         results = []
         articles = db.get_all_articles()
@@ -119,7 +111,6 @@ class Coordinator(BaseAgent):
             elif word_count < 600 or section_count < 4:
                 candidates_thin.append(full)
 
-        # Process feedback articles first
         for candidate in candidates_with_feedback[:batch_size]:
             talk_messages = db.get_talk_messages(candidate["id"])
             feedback_text = "\n".join(
@@ -135,7 +126,6 @@ class Coordinator(BaseAgent):
                 )
                 results.append(result)
 
-        # Fill remaining with thin articles
         remaining = batch_size - len(results)
         if remaining > 0 and candidates_thin:
             sorted_thin = sorted(candidates_thin, key=lambda a: len(a["content"].split()))
@@ -146,7 +136,7 @@ class Coordinator(BaseAgent):
 
         return results
 
-    def _create_from_pending(self, batch_size: int = 5) -> list[dict]:
+    def _create_from_pending(self, batch_size: int = 2) -> list[dict]:
         """Create up to batch_size articles from pending See also topics."""
         results = []
         for _ in range(batch_size):
@@ -154,20 +144,6 @@ class Coordinator(BaseAgent):
             if not pending:
                 break
             topic, category = pending
-            existing = db.get_article(db.slugify(topic))
-            if existing:
-                result = self._review_existing(existing)
-                results.append(result)
-            else:
-                result = self._create_new(topic, category)
-                results.append(result)
-        return results
-
-    def _create_from_static(self, batch_size: int = 5) -> list[dict]:
-        """Create up to batch_size articles from the static topic list."""
-        results = []
-        for _ in range(batch_size):
-            topic, category = pick_topic()
             existing = db.get_article(db.slugify(topic))
             if existing:
                 result = self._review_existing(existing)
@@ -190,7 +166,6 @@ class Coordinator(BaseAgent):
         db.log_agent_action(writer.name, "create_article", article["id"], topic)
         db.add_talk_message(article["id"], writer.name, f"I've drafted an initial article on **{topic}**. Please review.")
 
-        # Queue See also topics for future articles
         see_also_topics = db.parse_see_also(content)
         for related_topic in see_also_topics:
             db.queue_pending_topic(related_topic, article["id"], category)
