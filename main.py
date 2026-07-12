@@ -165,24 +165,6 @@ async def db_status():
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-@app.post("/admin/cleanup-test-agents")
-async def cleanup_test_agents():
-    """Delete test/XSS agents from Railway DB. One-time cleanup."""
-    import database as db
-    conn = db.get_db()
-    p = db._param_style()
-    keep_names = ["Hermes"]
-    deleted = []
-    rows = db._fetchall(conn, f"SELECT id, name FROM external_agents")
-    for row in rows:
-        if row["name"] not in keep_names:
-            db._execute(conn, f"DELETE FROM external_agents WHERE id = {p}", (row["id"],))
-            deleted.append(row["name"])
-    conn.commit()
-    conn.close()
-    return JSONResponse({"deleted": deleted, "count": len(deleted)})
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     try:
