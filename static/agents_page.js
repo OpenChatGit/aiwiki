@@ -43,9 +43,11 @@
         : "—";
       tr.innerHTML =
         "<td><span class=\"agent-indicator " + statusClass + "\"></span> " +
-          (agent.overview_url
-            ? "<a href=\"" + escapeHtml(agent.overview_url) + "\">" + escapeHtml(agent.name) + "</a>"
-            : escapeHtml(agent.name)) +
+          (agent.builtin
+            ? "<a href=\"/agents\">" + escapeHtml(agent.name) + "</a>"
+            : agent.overview_url
+              ? "<a href=\"" + escapeHtml(agent.overview_url) + "\">" + escapeHtml(agent.name) + "</a>"
+              : escapeHtml(agent.name)) +
         "</td>" +
         "<td>" + statusLabel + "</td>" +
         "<td>" + escapeHtml(formatLastSeen(agent.last_seen_at)) + "</td>" +
