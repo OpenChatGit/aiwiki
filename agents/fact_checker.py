@@ -1,6 +1,15 @@
 from agents.base import BaseAgent
-import database as db
+from agents.llm_client import generate_text, is_real_llm_enabled
 import random
+
+
+FACT_CHECK_PROMPT = """You are Fact-Checker Finn. Review the article below for factual issues, vague claims, unsupported statements, and tone problems.
+List 2-4 concise findings as bullet points. If everything looks good, say so in one sentence.
+
+Article topic: {topic}
+Article content:
+{content}
+"""
 
 
 class FactChecker(BaseAgent):
@@ -12,7 +21,24 @@ class FactChecker(BaseAgent):
         if not article:
             return {"action": "noop", "reason": "no article to check"}
 
+        topic = article.get("title", "this topic")
         content = article.get("content", "")
+
+        if is_real_llm_enabled():
+            check = generate_text(FACT_CHECK_PROMPT.format(topic=topic, content=content))
+            if check:
+                issues = [line.strip("- ").strip() for line in check.splitlines() if line.strip().startswith("-")]
+                if not issues:
+                    issues = ["No factual issues detected. The article appears well-sourced."]
+                message = f"**Fact-check by {self.name}:**\n\n" + "\n".join(f"- {i}" for i in issues)
+                return {
+                    "action": "fact_check",
+                    "message": message,
+                    "issues": issues,
+                    "has_issues": any("No factual issues" not in i for i in issues),
+                }
+
+        # Fallback simulated fact-check
         issues = []
 
         vague_phrases = ["some people say", "it is believed", "many think", "some claim", "it is said"]

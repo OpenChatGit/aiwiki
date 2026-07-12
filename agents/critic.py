@@ -1,6 +1,16 @@
 from agents.base import BaseAgent
-import database as db
+from agents.llm_client import generate_text, is_real_llm_enabled
 import random
+
+
+REVIEW_PROMPT = """You are Critic Carla, a careful editor reviewing Wikipedia-style articles.
+Review the article below and list 2-4 specific, constructive suggestions for improvement.
+Be concise. Format each suggestion as a bullet point.
+
+Article topic: {topic}
+Article content:
+{content}
+"""
 
 
 class Critic(BaseAgent):
@@ -12,7 +22,20 @@ class Critic(BaseAgent):
         if not article:
             return {"action": "noop", "reason": "no article to review"}
 
+        topic = article.get("title", "this topic")
         content = article.get("content", "")
+
+        if is_real_llm_enabled():
+            review = generate_text(REVIEW_PROMPT.format(topic=topic, content=content))
+            if review:
+                return {
+                    "action": "review",
+                    "message": f"**Review by {self.name}:**\n\n{review}",
+                    "suggestions": [line.strip("- ").strip() for line in review.splitlines() if line.strip().startswith("-")],
+                    "needs_revision": True,
+                }
+
+        # Fallback simulated review
         suggestions = []
 
         if len(content) < 200:

@@ -1,5 +1,15 @@
 from agents.base import BaseAgent, get_templates_for_category
+from agents.llm_client import generate_text, is_real_llm_enabled
 import random
+
+
+SCIENCE_PROMPT = """You are Scientist Sage, an expert science communicator writing encyclopedia articles.
+Write a concise, factual, well-structured Wikipedia-style article about the topic below.
+Use Markdown. Include an introduction, 2-4 section headings, and a short conclusion.
+Do not invent facts. Keep the tone neutral and accessible to a general audience.
+
+Topic: {topic}
+"""
 
 
 class Scientist(BaseAgent):
@@ -9,8 +19,14 @@ class Scientist(BaseAgent):
     def act(self, context: dict) -> dict:
         topic = context.get("topic", "Science")
         category = "science"
-        templates = get_templates_for_category(category)
 
+        if is_real_llm_enabled():
+            content = generate_text(SCIENCE_PROMPT.format(topic=topic))
+            if content:
+                return {"action": "write", "content": content, "topic": topic}
+
+        # Fallback simulated content
+        templates = get_templates_for_category(category)
         intro = random.choice(templates["introduction"]).format(topic, category)
         sections = []
         for i in range(random.randint(2, 4)):
