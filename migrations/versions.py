@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import core.database as db
-import config
+import core.config as config
 
 
 @dataclass(frozen=True)
