@@ -97,6 +97,11 @@ body {
   font-style: italic;
   font-size: 12px;
 }
+.agent-ago {
+  color: #72777d;
+  font-size: 11px;
+  margin-left: 2px;
+}
 .sidebar-show-all {
   padding: 4px 10px 0;
   margin: 0;

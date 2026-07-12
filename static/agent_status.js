@@ -11,20 +11,34 @@
     return div.innerHTML;
   }
 
+  function timeAgo(iso) {
+    if (!iso) return "";
+    var now = Date.now();
+    var then = new Date(iso).getTime();
+    var diff = Math.floor((now - then) / 1000);
+    if (diff < 0) return "just now";
+    if (diff < 60) return diff + "s ago";
+    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+    if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+    return Math.floor(diff / 86400) + "d ago";
+  }
+
   function renderAgent(agent) {
     var li = document.createElement("li");
     var statusClass = agent.online ? "online" : "offline";
     var statusLabel = agent.online ? "Online" : "Offline";
+    var ago = agent.builtin ? "" : timeAgo(agent.last_seen_at);
+    var agoHtml = ago ? ' <span class="agent-ago">' + ago + "</span>" : "";
     var nameHtml;
     if (agent.builtin) {
       nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
         '<a href="' + escapeHtml(agent.overview_url || '/agents') + '">' + escapeHtml(agent.name) + '</a>';
     } else if (agent.overview_url) {
       nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-        '<a href="' + escapeHtml(agent.overview_url) + '">' + escapeHtml(agent.name) + '</a>';
+        '<a href="' + escapeHtml(agent.overview_url) + '">' + escapeHtml(agent.name) + '</a>' + agoHtml;
     } else {
       nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-        escapeHtml(agent.name);
+        escapeHtml(agent.name) + agoHtml;
     }
     li.innerHTML = nameHtml;
     return li;
