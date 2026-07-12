@@ -25,77 +25,78 @@ class Coordinator(BaseAgent):
             pass
 
     def act(self, context: dict) -> dict:
-        self._track(self.name, "starting cycle")
-        # First priority: review external agent submissions
-        reviewed = self._review_external_submissions()
-        if reviewed:
-            self._track(self.name, f"reviewed external: {reviewed.get('slug', 'unknown')}")
-            return reviewed
+        self._track(self.name, "starting batch cycle")
+        results = []
 
-        # Second priority: improve existing low-quality articles
-        improved = self._improve_low_quality()
-        if improved:
-            self._track(self.name, f"improved article: {improved.get('slug', 'unknown')}")
-            return improved
+        # Batch 1: Review up to 10 external submissions
+        reviewed = self._review_external_submissions(batch_size=10)
+        results.extend(reviewed)
 
-        # Third priority: pick from pending See also topics
-        pending = db.pop_pending_topic()
-        if pending:
-            topic, category = pending
-            existing = db.get_article(db.slugify(topic))
-            if existing:
-                return self._review_existing(existing)
-            return self._create_new(topic, category)
+        # Batch 2: Improve up to 5 low-quality articles
+        improved = self._improve_low_quality(batch_size=5)
+        results.extend(improved)
 
-        # Otherwise pick from the static topic list
-        topic, category = pick_topic()
-        existing = db.get_article(db.slugify(topic))
-        if existing:
-            return self._review_existing(existing)
-        return self._create_new(topic, category)
+        # Batch 3: Create up to 5 new articles from pending topics
+        created = self._create_from_pending(batch_size=5)
+        results.extend(created)
 
-    def _review_external_submissions(self) -> dict | None:
-        """Review articles submitted by external agents that need review."""
+        # Batch 4: Create up to 5 new articles from static topic list
+        if len(results) < 20:
+            remaining = 20 - len(results)
+            created_static = self._create_from_static(batch_size=remaining)
+            results.extend(created_static)
+
+        self._track(self.name, f"batch complete: {len(results)} actions")
+        return {"action": "batch", "results": results, "count": len(results)}
+
+    def _review_external_submissions(self, batch_size: int = 10) -> list[dict]:
+        """Review up to batch_size external agent submissions."""
+        results = []
         pending = db.get_articles_needing_review()
         if not pending:
-            return None
-        article = pending[0]
-        full = db.get_article(article["slug"])
-        if not full:
-            return None
-        # Run critic and fact-checker
-        self._track(self.critic.name, f"reviewing external: {full['title']}")
-        critic_result = self.critic.act({"article": full})
-        db.add_talk_message(full["id"], self.critic.name, critic_result["message"])
+            return results
 
-        self._track(self.fact_checker.name, f"fact-checking external: {full['title']}")
-        fact_result = self.fact_checker.act({"article": full})
-        db.add_talk_message(full["id"], self.fact_checker.name, fact_result["message"])
+        for article in pending[:batch_size]:
+            full = db.get_article(article["slug"])
+            if not full:
+                continue
 
-        db.clear_needs_review(full["id"])
-        db.log_agent_action(self.name, "review_external", full["id"], full["title"])
+            self._track(self.critic.name, f"reviewing external: {full['title']}")
+            critic_result = self.critic.act({"article": full})
+            db.add_talk_message(full["id"], self.critic.name, critic_result["message"])
 
-        if critic_result.get("needs_revision") or fact_result.get("has_issues"):
-            db.add_talk_message(
-                full["id"], self.name,
-                f"Review complete. Some issues were flagged. The article author has been notified."
-            )
-        else:
-            db.add_talk_message(
-                full["id"], self.name,
-                "Review complete. No significant issues found. Article is published."
-            )
+            self._track(self.fact_checker.name, f"fact-checking external: {full['title']}")
+            fact_result = self.fact_checker.act({"article": full})
+            db.add_talk_message(full["id"], self.fact_checker.name, fact_result["message"])
 
-        return {"action": "reviewed_external", "article_id": full["id"], "slug": full["slug"]}
+            db.clear_needs_review(full["id"])
+            db.log_agent_action(self.name, "review_external", full["id"], full["title"])
 
-    def _improve_low_quality(self) -> dict | None:
+            if critic_result.get("needs_revision") or fact_result.get("has_issues"):
+                db.add_talk_message(
+                    full["id"], self.name,
+                    "Review complete. Some issues were flagged. The article author has been notified."
+                )
+            else:
+                db.add_talk_message(
+                    full["id"], self.name,
+                    "Review complete. No significant issues found. Article is published."
+                )
+
+            results.append({"action": "reviewed_external", "article_id": full["id"], "slug": full["slug"]})
+
+        return results
+
+    def _improve_low_quality(self, batch_size: int = 5) -> list[dict]:
+        """Improve up to batch_size low-quality articles."""
+        results = []
         articles = db.get_all_articles()
         if not articles:
-            return None
+            return results
 
-        # First priority: articles with unresolved talk page feedback
         candidates_with_feedback = []
         candidates_thin = []
+
         for article_summary in articles:
             full = db.get_article(article_summary["slug"])
             if not full:
@@ -105,7 +106,6 @@ class Coordinator(BaseAgent):
             word_count = len(full["content"].split())
             section_count = full["content"].count("## ")
 
-            # Check if there's unresolved feedback on the talk page
             talk_messages = db.get_talk_messages(full["id"])
             has_unresolved = any(
                 "needs_revision" in msg.get("message", "").lower()
@@ -119,10 +119,8 @@ class Coordinator(BaseAgent):
             elif word_count < 600 or section_count < 4:
                 candidates_thin.append(full)
 
-        # Pick from unresolved feedback first, then thin articles
-        if candidates_with_feedback:
-            candidate = candidates_with_feedback[0]
-            # Collect talk page feedback to pass to the improver
+        # Process feedback articles first
+        for candidate in candidates_with_feedback[:batch_size]:
             talk_messages = db.get_talk_messages(candidate["id"])
             feedback_text = "\n".join(
                 f"- {msg['agent_name']}: {msg['message'][:500]}"
@@ -135,13 +133,49 @@ class Coordinator(BaseAgent):
                     candidate["id"], self.name,
                     f"Addressed feedback and improved the article. @{candidate.get('title', '')} has been revised."
                 )
-                return result
+                results.append(result)
 
-        if not candidates_thin:
-            return None
+        # Fill remaining with thin articles
+        remaining = batch_size - len(results)
+        if remaining > 0 and candidates_thin:
+            sorted_thin = sorted(candidates_thin, key=lambda a: len(a["content"].split()))
+            for candidate in sorted_thin[:remaining]:
+                result = self.quality_improver.act({"article": candidate})
+                if result.get("action") != "noop":
+                    results.append(result)
 
-        candidate = min(candidates_thin, key=lambda a: len(a["content"].split()))
-        return self.quality_improver.act({"article": candidate})
+        return results
+
+    def _create_from_pending(self, batch_size: int = 5) -> list[dict]:
+        """Create up to batch_size articles from pending See also topics."""
+        results = []
+        for _ in range(batch_size):
+            pending = db.pop_pending_topic()
+            if not pending:
+                break
+            topic, category = pending
+            existing = db.get_article(db.slugify(topic))
+            if existing:
+                result = self._review_existing(existing)
+                results.append(result)
+            else:
+                result = self._create_new(topic, category)
+                results.append(result)
+        return results
+
+    def _create_from_static(self, batch_size: int = 5) -> list[dict]:
+        """Create up to batch_size articles from the static topic list."""
+        results = []
+        for _ in range(batch_size):
+            topic, category = pick_topic()
+            existing = db.get_article(db.slugify(topic))
+            if existing:
+                result = self._review_existing(existing)
+                results.append(result)
+            else:
+                result = self._create_new(topic, category)
+                results.append(result)
+        return results
 
     def _create_new(self, topic: str, category: str) -> dict:
         writer = self.historian if category_for_writer(category) == "history" else self.scientist

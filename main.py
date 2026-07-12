@@ -50,11 +50,15 @@ def agent_loop():
             _agent_loop_state["last_run_at"] = time.time()
             _agent_loop_state["last_action"] = result.get("action")
             _agent_loop_state["last_error"] = None
-            if result.get("action") == "created":
+            action = result.get("action")
+            if action == "batch":
+                count = result.get("count", 0)
+                logger.info("[Agent] %s batch complete: %d actions", coordinator.name, count)
+            elif action == "created":
                 logger.info("[Agent] %s created article: %s", coordinator.name, result.get("topic"))
-            elif result.get("action") == "reviewed":
+            elif action == "reviewed":
                 logger.info("[Agent] %s reviewed: %s", coordinator.name, result.get("slug"))
-            elif result.get("action") == "improved":
+            elif action == "improved":
                 logger.info("[Agent] %s improved: %s", coordinator.name, result.get("slug"))
         except Exception as e:
             _agent_loop_state["last_run_at"] = time.time()
