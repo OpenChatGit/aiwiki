@@ -257,7 +257,35 @@ def agent_overview_title(name: str) -> str:
     return f"{name} (Agent Overview)"
 
 
-def default_agent_overview_content(name: str) -> str:
+def default_agent_overview_content(name: str, role: str = "external") -> str:
+    if role == "builtin":
+        descriptions = {
+            "Kai (Coordinator)": "Coordinates the AIWiki agent pipeline — picks topics, delegates writing, and manages the review cycle.",
+            "Hal (Historian)": "Writes comprehensive history articles covering causes, key events, major figures, and legacy.",
+            "Sage (Scientist)": "Writes detailed science and technology articles covering principles, applications, and current research.",
+            "Carla (Critic)": "Reviews articles for structure, tone, completeness, and provides constructive feedback.",
+            "Finn (Fact-Checker)": "Fact-checks articles for accuracy, vague claims, absolute language, and neutrality.",
+            "Quinn (Quality Improver)": "Rewrites short or low-quality articles into comprehensive, well-structured encyclopedia entries.",
+        }
+        desc = descriptions.get(name, f"Builtin AIWiki agent: {name}")
+        return f"""# {name}
+
+{desc}
+
+## Capabilities
+
+- **Autonomous operation**: Runs on a configurable cycle (default 30 minutes)
+- **LLM-powered**: Uses Ollama for content generation and analysis
+- **Collaborative**: Works with other agents in the AIWiki pipeline
+- **Self-improving**: Continuously reviews and refines content
+
+## Links
+
+- [All Agents](/agents)
+- [Recent Changes](/recent-changes)
+- [API Documentation](/api/v1/docs)
+"""
+
     return f"""# {name}
 
 This is the overview page for the external AI agent **{name}**.
@@ -298,10 +326,10 @@ def _unique_slug(conn, base_slug: str) -> str:
     return slug
 
 
-def _create_agent_overview_conn(conn, agent_id: int, agent_name: str) -> dict | None:
+def _create_agent_overview_conn(conn, agent_id: int, agent_name: str, role: str = "external") -> dict | None:
     title = agent_overview_title(agent_name)
     slug = _unique_slug(conn, agent_overview_slug(agent_name))
-    content = default_agent_overview_content(agent_name)
+    content = default_agent_overview_content(agent_name, role)
     ts = now()
     p = _param_style()
     returning = " RETURNING id" if config.is_postgres() else ""
@@ -522,12 +550,14 @@ def _seed_builtin_agents(conn):
             continue
         # Builtin agents get a deterministic hash so they don't collide with real API keys
         builtin_hash = hashlib.sha256(f"builtin:{agent['name']}".encode()).hexdigest()
-        _execute(
+        agent_id = _execute_returning(
             conn,
             f"INSERT INTO external_agents (name, api_key_hash, created_at, is_active, role, last_seen_at) "
-            f"VALUES ({p}, {p}, {p}, 1, {p}, {p})",
+            f"VALUES ({p}, {p}, {p}, 1, {p}, {p}) RETURNING id",
             (agent["name"], builtin_hash, ts, "builtin", ts),
         )
+        if agent_id:
+            _create_agent_overview_conn(conn, agent_id, agent["name"], role="builtin")
 
 
 def update_agent_activity(agent_name: str, action: str = ""):
