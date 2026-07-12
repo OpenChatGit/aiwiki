@@ -1,13 +1,13 @@
 import markdown
 from fastapi import APIRouter, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 import database as db
 import security
 import config
+from template_env import create_templates
 
 router = APIRouter(prefix="/wiki")
-templates = Jinja2Templates(directory="templates")
+templates = create_templates()
 
 
 @router.get("/{slug}", response_class=HTMLResponse)
@@ -16,6 +16,13 @@ async def article_view(request: Request, slug: str):
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     content_html = security.render_markdown(article["content"])
+    is_overview = db.is_agent_overview(article)
+    activity = []
+    owner_agent = None
+    if is_overview and article.get("owner_agent_id"):
+        owner_agent = db.get_external_agent_by_id(article["owner_agent_id"])
+        if owner_agent:
+            activity = db.get_external_agent_activity(owner_agent["id"], 10)
     return templates.TemplateResponse(
         "article.html",
         {
@@ -23,7 +30,9 @@ async def article_view(request: Request, slug: str):
             "article": article,
             "slug": slug,
             "content_html": content_html,
-            "is_agent_overview": db.is_agent_overview(article),
+            "is_agent_overview": is_overview,
+            "owner_agent": owner_agent,
+            "agent_activity": activity,
         },
     )
 

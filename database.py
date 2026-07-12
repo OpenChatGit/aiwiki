@@ -175,14 +175,23 @@ def init_db():
             version INTEGER NOT NULL
         )
     """)
-    _ensure_schema_version(conn)
     _ensure_indexes(conn)
-    _migrate_articles(conn)
-    _migrate_external_agents(conn)
-    _backfill_agent_overviews(conn)
-    _seed_builtin_agents(conn)
-    conn.commit()
+    from migrations.runner import run_migrations
+
+    run_migrations(conn, close=False)
     conn.close()
+
+
+def _table_exists(conn, table: str) -> bool:
+    if config.is_postgres():
+        row = _fetchone(
+            conn,
+            "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
+            (table,),
+        )
+        return row is not None
+    row = _fetchone(conn, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))
+    return row is not None
 
 
 def _column_exists(conn, table: str, column: str) -> bool:
@@ -195,33 +204,6 @@ def _column_exists(conn, table: str, column: str) -> bool:
         return row is not None
     rows = _fetchall(conn, f"PRAGMA table_info({table})")
     return any(r.get("name") == column for r in rows)
-
-
-def _migrate_articles(conn):
-    if not _column_exists(conn, "articles", "article_kind"):
-        _execute(conn, "ALTER TABLE articles ADD COLUMN article_kind TEXT NOT NULL DEFAULT 'encyclopedia'")
-    if not _column_exists(conn, "articles", "owner_agent_id"):
-        _execute(conn, "ALTER TABLE articles ADD COLUMN owner_agent_id INTEGER")
-
-
-def _migrate_external_agents(conn):
-    if not _column_exists(conn, "external_agents", "last_seen_at"):
-        _execute(conn, "ALTER TABLE external_agents ADD COLUMN last_seen_at TEXT")
-    if not _column_exists(conn, "external_agents", "overview_article_id"):
-        _execute(conn, "ALTER TABLE external_agents ADD COLUMN overview_article_id INTEGER")
-    if not _column_exists(conn, "external_agents", "role"):
-        _execute(conn, "ALTER TABLE external_agents ADD COLUMN role TEXT NOT NULL DEFAULT 'external'")
-    if not _column_exists(conn, "external_agents", "last_action"):
-        _execute(conn, "ALTER TABLE external_agents ADD COLUMN last_action TEXT")
-    if not _column_exists(conn, "external_agents", "last_action_at"):
-        _execute(conn, "ALTER TABLE external_agents ADD COLUMN last_action_at TEXT")
-
-
-def _ensure_schema_version(conn):
-    row = _fetchone(conn, "SELECT version FROM schema_version LIMIT 1")
-    if not row:
-        p = _param_style()
-        _execute(conn, f"INSERT INTO schema_version (version) VALUES ({p})", (1,))
 
 
 def _ensure_indexes(conn):
@@ -257,35 +239,7 @@ def agent_overview_title(name: str) -> str:
     return f"{name} (Agent Overview)"
 
 
-def default_agent_overview_content(name: str, role: str = "external") -> str:
-    if role == "builtin":
-        descriptions = {
-            "Kai (Coordinator)": "Coordinates the AIWiki agent pipeline — picks topics, delegates writing, and manages the review cycle.",
-            "Hal (Historian)": "Writes comprehensive history articles covering causes, key events, major figures, and legacy.",
-            "Sage (Scientist)": "Writes detailed science and technology articles covering principles, applications, and current research.",
-            "Carla (Critic)": "Reviews articles for structure, tone, completeness, and provides constructive feedback.",
-            "Finn (Fact-Checker)": "Fact-checks articles for accuracy, vague claims, absolute language, and neutrality.",
-            "Quinn (Quality Improver)": "Rewrites short or low-quality articles into comprehensive, well-structured encyclopedia entries.",
-        }
-        desc = descriptions.get(name, f"Builtin AIWiki agent: {name}")
-        return f"""# {name}
-
-{desc}
-
-## Capabilities
-
-- **Autonomous operation**: Runs on a configurable cycle (default 30 minutes)
-- **LLM-powered**: Uses Ollama for content generation and analysis
-- **Collaborative**: Works with other agents in the AIWiki pipeline
-- **Self-improving**: Continuously reviews and refines content
-
-## Links
-
-- [All Agents](/agents)
-- [Recent Changes](/recent-changes)
-- [API Documentation](/api/v1/docs)
-"""
-
+def default_agent_overview_content(name: str) -> str:
     return f"""# {name}
 
 This is the overview page for the external AI agent **{name}**.
@@ -326,10 +280,10 @@ def _unique_slug(conn, base_slug: str) -> str:
     return slug
 
 
-def _create_agent_overview_conn(conn, agent_id: int, agent_name: str, role: str = "external") -> dict | None:
+def _create_agent_overview_conn(conn, agent_id: int, agent_name: str) -> dict | None:
     title = agent_overview_title(agent_name)
     slug = _unique_slug(conn, agent_overview_slug(agent_name))
-    content = default_agent_overview_content(agent_name, role)
+    content = default_agent_overview_content(agent_name)
     ts = now()
     p = _param_style()
     returning = " RETURNING id" if config.is_postgres() else ""
@@ -356,15 +310,18 @@ def _create_agent_overview_conn(conn, agent_id: int, agent_name: str, role: str 
         return None
 
 
-def _backfill_agent_overviews(conn):
+def backfill_agent_overviews(conn) -> int:
     rows = _fetchall(
         conn,
         "SELECT id, name, overview_article_id FROM external_agents WHERE is_active = 1",
     )
+    created = 0
     for row in rows:
         if row.get("overview_article_id"):
             continue
-        _create_agent_overview_conn(conn, row["id"], row["name"])
+        if _create_agent_overview_conn(conn, row["id"], row["name"]):
+            created += 1
+    return created
 
 
 def create_article(
@@ -483,8 +440,8 @@ def register_external_agent(name: str) -> dict | None:
 
     try:
         agent_id = _execute_returning(
-            conn, f"INSERT INTO external_agents (name, api_key_hash, created_at, last_seen_at, role) VALUES ({p}, {p}, {p}, {p}, {p}){returning}",
-            (name, api_key_hash, ts, ts, "external"))
+            conn, f"INSERT INTO external_agents (name, api_key_hash, created_at, last_seen_at) VALUES ({p}, {p}, {p}, {p}){returning}",
+            (name, api_key_hash, ts, ts))
         overview = _create_agent_overview_conn(conn, agent_id, name)
         if not overview:
             conn.rollback()
@@ -507,7 +464,7 @@ def register_external_agent(name: str) -> dict | None:
 def verify_external_agent(api_key: str) -> dict | None:
     conn = get_db()
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    row = _fetchone(conn, f"SELECT id, name FROM external_agents WHERE api_key_hash = {_param_style()} AND is_active = 1 AND role = 'external'",
+    row = _fetchone(conn, f"SELECT id, name FROM external_agents WHERE api_key_hash = {_param_style()} AND is_active = 1",
                     (api_key_hash,))
     if row:
         ts = now()
@@ -530,60 +487,70 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
-BUILTIN_AGENTS = [
-    {"name": "Kai (Coordinator)", "role": "coordinator"},
-    {"name": "Hal (Historian)", "role": "history"},
-    {"name": "Sage (Scientist)", "role": "science"},
-    {"name": "Carla (Critic)", "role": "critic"},
-    {"name": "Finn (Fact-Checker)", "role": "fact_checker"},
-    {"name": "Quinn (Quality Improver)", "role": "quality_improver"},
-]
+PRESENCE_LABELS = {
+    "active": "Active",
+    "afk": "AFK",
+    "offline": "Offline",
+}
 
 
-def _seed_builtin_agents(conn):
-    """Insert builtin agents into external_agents table if not present."""
-    p = _param_style()
-    ts = now()
-    for agent in BUILTIN_AGENTS:
-        existing = _fetchone(conn, f"SELECT id FROM external_agents WHERE name = {p} AND role = {p}", (agent["name"], "builtin"))
-        if existing:
-            continue
-        # Builtin agents get a deterministic hash so they don't collide with real API keys
-        builtin_hash = hashlib.sha256(f"builtin:{agent['name']}".encode()).hexdigest()
-        agent_id = _execute_returning(
-            conn,
-            f"INSERT INTO external_agents (name, api_key_hash, created_at, is_active, role, last_seen_at) "
-            f"VALUES ({p}, {p}, {p}, 1, {p}, {p}) RETURNING id",
-            (agent["name"], builtin_hash, ts, "builtin", ts),
-        )
-        if agent_id:
-            _create_agent_overview_conn(conn, agent_id, agent["name"], role="builtin")
+def resolve_agent_presence(
+    last_seen_at: str | None,
+    presence_status: str | None,
+    threshold: int | None = None,
+    now_dt: datetime | None = None,
+) -> dict:
+    manual = (presence_status or "").strip().lower()
+    if manual in PRESENCE_LABELS:
+        return {
+            "presence": manual,
+            "presence_mode": "manual",
+            "presence_label": PRESENCE_LABELS[manual],
+            "online": manual == "active",
+        }
+
+    threshold = threshold if threshold is not None else config.AGENT_ONLINE_THRESHOLD_SECONDS
+    now_dt = now_dt or datetime.now(timezone.utc)
+    seen_dt = _parse_iso(last_seen_at)
+    auto_active = bool(seen_dt and (now_dt - seen_dt).total_seconds() <= threshold)
+    presence = "active" if auto_active else "offline"
+    return {
+        "presence": presence,
+        "presence_mode": "auto",
+        "presence_label": PRESENCE_LABELS[presence],
+        "online": auto_active,
+    }
 
 
-def update_agent_activity(agent_name: str, action: str = ""):
-    """Update last_seen_at and optionally last_action for any agent (builtin or external)."""
+def set_agent_presence(api_key: str, status: str) -> dict | None:
+    status = status.strip().lower()
+    if status not in ("auto", *PRESENCE_LABELS.keys()):
+        return None
+    agent = get_external_agent_details(api_key)
+    if not agent or not agent.get("is_active"):
+        return None
+    stored = None if status == "auto" else status
     conn = get_db()
-    ts = now()
     p = _param_style()
-    _execute(
-        conn,
-        f"UPDATE external_agents SET last_seen_at = {p}, last_action = {p}, last_action_at = {p} WHERE name = {p}",
-        (ts, action, ts, agent_name),
-    )
+    _execute(conn, f"UPDATE external_agents SET presence_status = {p} WHERE id = {p}", (stored, agent["id"]))
     conn.commit()
     conn.close()
+    resolved = resolve_agent_presence(agent.get("last_seen_at"), stored)
+    return {
+        "name": agent["name"],
+        "presence_setting": status,
+        **resolved,
+    }
 
 
 def get_external_agents_status() -> list[dict]:
     conn = get_db()
     rows = _fetchall(
         conn,
-        """SELECT e.id, e.name, e.created_at, e.last_seen_at, e.is_active, e.role, e.last_action, e.last_action_at,
-                  a.slug AS overview_slug
+        """SELECT e.id, e.name, e.created_at, e.last_seen_at, e.presence_status, e.is_active, a.slug AS overview_slug
            FROM external_agents e
            LEFT JOIN articles a ON a.id = e.overview_article_id
-           WHERE e.is_active = 1
-           ORDER BY e.role ASC, e.name ASC""",
+           ORDER BY e.name ASC""",
     )
     conn.close()
 
@@ -591,26 +558,23 @@ def get_external_agents_status() -> list[dict]:
     now_dt = datetime.now(timezone.utc)
     agents = []
     for row in rows:
+        if not row.get("is_active"):
+            continue
         last_seen = row.get("last_seen_at")
-        seen_dt = _parse_iso(last_seen)
-        is_builtin = row.get("role") == "builtin"
-        online = is_builtin or bool(seen_dt and (now_dt - seen_dt).total_seconds() <= threshold)
         overview_slug = row.get("overview_slug")
+        presence = resolve_agent_presence(last_seen, row.get("presence_status"), threshold, now_dt)
         agents.append({
             "id": row["id"],
             "name": row["name"],
-            "role": row.get("role", "external"),
             "created_at": row["created_at"],
             "last_seen_at": last_seen,
-            "last_action": row.get("last_action"),
-            "last_action_at": row.get("last_action_at"),
-            "online": online,
             "overview_slug": overview_slug,
             "overview_url": f"/wiki/{overview_slug}" if overview_slug else None,
-            "builtin": row.get("role") == "builtin",
+            **presence,
         })
 
-    agents.sort(key=lambda a: (not a["online"], a["last_seen_at"] or "", a["name"]))
+    order = {"active": 0, "afk": 1, "offline": 2}
+    agents.sort(key=lambda a: (order.get(a["presence"], 9), a["last_seen_at"] or "", a["name"]))
     return agents
 
 
@@ -619,7 +583,8 @@ def get_external_agent_details(api_key: str) -> dict | None:
     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()
     row = _fetchone(
         conn,
-        """SELECT e.id, e.name, e.created_at, e.is_active, e.overview_article_id, a.slug AS overview_slug
+        """SELECT e.id, e.name, e.created_at, e.is_active, e.last_seen_at, e.presence_status,
+                  e.overview_article_id, a.slug AS overview_slug
            FROM external_agents e
            LEFT JOIN articles a ON a.id = e.overview_article_id
            WHERE e.api_key_hash = """ + _param_style(),
@@ -758,7 +723,193 @@ def get_recent_changes(limit: int = 20) -> list[dict]:
     rows = _fetchall(conn,
         f"""SELECT r.id, r.article_id, a.title, a.slug, r.agent_name, r.summary, r.timestamp
            FROM revisions r JOIN articles a ON r.article_id = a.id
+           WHERE a.article_kind != 'agent_overview'
            ORDER BY r.timestamp DESC LIMIT {p}""",
         (limit,))
     conn.close()
     return rows
+
+
+def get_encyclopedia_articles(limit: int | None = None) -> list[dict]:
+    conn = get_db()
+    query = (
+        "SELECT id, title, slug, updated_at, article_kind FROM articles "
+        "WHERE article_kind = 'encyclopedia' OR article_kind IS NULL "
+        "ORDER BY updated_at DESC"
+    )
+    if limit is not None:
+        query += f" LIMIT {_param_style()}"
+        rows = _fetchall(conn, query, (limit,))
+    else:
+        rows = _fetchall(conn, query)
+    conn.close()
+    return rows
+
+
+def get_migration_status() -> dict:
+    from migrations.runner import get_migration_status as _status
+
+    return _status()
+
+
+def search_articles(query: str, limit: int = 25) -> list[dict]:
+    q = query.strip()
+    if not q or len(q) < 2:
+        return []
+    conn = get_db()
+    p = _param_style()
+    pattern = f"%{q}%"
+    if config.is_postgres():
+        rows = _fetchall(
+            conn,
+            f"""SELECT id, title, slug, updated_at, article_kind
+                FROM articles
+                WHERE (article_kind = 'encyclopedia' OR article_kind IS NULL)
+                  AND (title ILIKE {p} OR content ILIKE {p})
+                ORDER BY updated_at DESC
+                LIMIT {p}""",
+            (pattern, pattern, limit),
+        )
+    else:
+        rows = _fetchall(
+            conn,
+            f"""SELECT id, title, slug, updated_at, article_kind
+                FROM articles
+                WHERE (article_kind = 'encyclopedia' OR article_kind IS NULL)
+                  AND (title LIKE {p} OR content LIKE {p})
+                ORDER BY updated_at DESC
+                LIMIT {p}""",
+            (pattern, pattern, limit),
+        )
+    conn.close()
+    return rows
+
+
+def check_article_title(title: str) -> dict:
+    slug = slugify(title)
+    existing = get_article(slug)
+    conn = get_db()
+    p = _param_style()
+    pattern = f"%{title.strip()}%"
+    if config.is_postgres():
+        similar = _fetchall(
+            conn,
+            f"""SELECT title, slug FROM articles
+                WHERE (article_kind = 'encyclopedia' OR article_kind IS NULL)
+                  AND title ILIKE {p}
+                ORDER BY title ASC LIMIT 10""",
+            (pattern,),
+        )
+    else:
+        similar = _fetchall(
+            conn,
+            f"""SELECT title, slug FROM articles
+                WHERE (article_kind = 'encyclopedia' OR article_kind IS NULL)
+                  AND title LIKE {p}
+                ORDER BY title ASC LIMIT 10""",
+            (pattern,),
+        )
+    conn.close()
+    if existing and existing.get("article_kind") == "agent_overview":
+        existing = None
+    similar = [s for s in similar if s["slug"] != slug]
+    return {
+        "title": title,
+        "slug": slug,
+        "exists": existing is not None,
+        "existing_slug": existing["slug"] if existing else None,
+        "similar": similar,
+    }
+
+
+def get_external_agent_by_id(agent_id: int) -> dict | None:
+    conn = get_db()
+    row = _fetchone(
+        conn,
+        f"""SELECT e.id, e.name, e.created_at, e.is_active, e.webhook_url, a.slug AS overview_slug
+            FROM external_agents e
+            LEFT JOIN articles a ON a.id = e.overview_article_id
+            WHERE e.id = {_param_style()} AND e.is_active = 1""",
+        (agent_id,),
+    )
+    conn.close()
+    return row
+
+
+def get_agent_webhook_url(agent_id: int) -> str | None:
+    conn = get_db()
+    row = _fetchone(
+        conn,
+        f"SELECT webhook_url FROM external_agents WHERE id = {_param_style()} AND is_active = 1",
+        (agent_id,),
+    )
+    conn.close()
+    if not row:
+        return None
+    url = (row.get("webhook_url") or "").strip()
+    return url or None
+
+
+def set_agent_webhook(agent_id: int, webhook_url: str | None) -> bool:
+    conn = get_db()
+    p = _param_style()
+    _execute(conn, f"UPDATE external_agents SET webhook_url = {p} WHERE id = {p}", (webhook_url, agent_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_external_agent_activity(agent_id: int, limit: int = 20) -> list[dict]:
+    agent = get_external_agent_by_id(agent_id)
+    if not agent:
+        return []
+    name = agent["name"]
+    conn = get_db()
+    p = _param_style()
+    like = f"{name}%"
+    logs = _fetchall(
+        conn,
+        f"""SELECT 'log' AS source, action AS kind, details AS summary, timestamp, article_id
+            FROM agent_logs
+            WHERE agent_name LIKE {p}
+            ORDER BY timestamp DESC
+            LIMIT {p}""",
+        (like, limit),
+    )
+    revisions = _fetchall(
+        conn,
+        f"""SELECT 'revision' AS source, 'edit' AS kind, r.summary, r.timestamp, r.article_id,
+                   a.title, a.slug
+            FROM revisions r
+            JOIN articles a ON a.id = r.article_id
+            WHERE r.agent_name LIKE {p}
+            ORDER BY r.timestamp DESC
+            LIMIT {p}""",
+        (like, limit),
+    )
+    conn.close()
+
+    activity = []
+    for row in logs:
+        activity.append({
+            "source": row["source"],
+            "kind": row["kind"],
+            "summary": row.get("summary") or row["kind"],
+            "timestamp": row["timestamp"],
+            "article_id": row.get("article_id"),
+            "slug": None,
+            "title": None,
+        })
+    for row in revisions:
+        activity.append({
+            "source": row["source"],
+            "kind": row["kind"],
+            "summary": row.get("summary") or "Edited article",
+            "timestamp": row["timestamp"],
+            "article_id": row.get("article_id"),
+            "slug": row.get("slug"),
+            "title": row.get("title"),
+        })
+
+    activity.sort(key=lambda item: item["timestamp"], reverse=True)
+    return activity[:limit]

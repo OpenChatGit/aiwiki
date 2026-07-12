@@ -2,12 +2,12 @@ import logging
 import threading
 import time
 import random
+import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 import database as db
 import config
@@ -17,7 +17,10 @@ from external_api.routes import router as api_router
 from agents.coordinator import Coordinator
 from seed_data import seed_database
 import security
-from rate_limit import registration_rate_limiter
+import webhooks
+from rate_limit import registration_rate_limiter, rate_limit_backend
+from static_assets import static_version
+from template_env import create_templates
 
 
 logging.basicConfig(
@@ -26,16 +29,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("aiwiki")
 
-templates = Jinja2Templates(directory="templates")
-templates.env.globals["wiki_edit_enabled"] = config.WIKI_EDIT_ENABLED
+templates = create_templates()
 
 coordinator = Coordinator()
+
+_agent_loop_state = {
+    "last_run_at": None,
+    "last_action": None,
+    "last_error": None,
+}
 
 
 def agent_loop():
     while True:
         try:
             result = coordinator.act({})
+            _agent_loop_state["last_run_at"] = time.time()
+            _agent_loop_state["last_action"] = result.get("action")
+            _agent_loop_state["last_error"] = None
             if result.get("action") == "created":
                 logger.info("[Agent] %s created article: %s", coordinator.name, result.get("topic"))
             elif result.get("action") == "reviewed":
@@ -43,6 +54,8 @@ def agent_loop():
             elif result.get("action") == "improved":
                 logger.info("[Agent] %s improved: %s", coordinator.name, result.get("slug"))
         except Exception as e:
+            _agent_loop_state["last_run_at"] = time.time()
+            _agent_loop_state["last_error"] = str(e)
             logger.error("[Agent] Error in agent loop: %s", e)
         time.sleep(AGENT_CYCLE_INTERVAL + random.randint(0, 60))
 
@@ -89,13 +102,22 @@ app = FastAPI(title="AIWiki", version="1.0.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
+    request.state.csp_nonce = secrets.token_urlsafe(16)
+    request.state.static_version = static_version()
     response = await call_next(request)
+    nonce = request.state.csp_nonce
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = f"public, max-age={config.STATIC_CACHE_SECONDS}, immutable"
+    else:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' https: data:; "
         "font-src 'self'; "
@@ -142,15 +164,27 @@ app.include_router(api_router)
 
 @app.get("/health")
 async def health():
+    db_start = time.perf_counter()
     try:
         _ensure_db()
-        articles = db.get_all_articles()
-        return JSONResponse({
+        articles = db.get_encyclopedia_articles()
+        db_ms = round((time.perf_counter() - db_start) * 1000, 2)
+        payload = {
             "status": "ok",
             "database": "ok",
+            "database_latency_ms": db_ms,
             "articles": len(articles),
             "llm_provider": config.LLM_PROVIDER,
-        })
+            "rate_limit_backend": rate_limit_backend(),
+            "migrations": db.get_migration_status(),
+            "agent_loop": {
+                "enabled": not config.DISABLE_AGENT_LOOP,
+                "last_run_at": _agent_loop_state["last_run_at"],
+                "last_action": _agent_loop_state["last_action"],
+                "last_error": _agent_loop_state["last_error"],
+            },
+        }
+        return JSONResponse(payload)
     except Exception as e:
         logger.error("Health check failed: %s", e)
         return JSONResponse({"status": "degraded", "database": "error"}, status_code=503)
@@ -168,8 +202,9 @@ async def db_status():
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     try:
-        articles = db.get_all_articles()
+        articles = db.get_encyclopedia_articles(20)
         recent_changes = db.get_recent_changes(10)
+        registered_agents = db.get_external_agents_status()
     except Exception:
         logger.exception("Failed to load index data")
         return HTMLResponse(
@@ -178,7 +213,22 @@ async def index(request: Request):
         )
     return templates.TemplateResponse(
         "index.html",
-        {"request": request, "articles": articles, "recent_changes": recent_changes},
+        {
+            "request": request,
+            "articles": articles,
+            "recent_changes": recent_changes,
+            "registered_agents": registered_agents,
+        },
+    )
+
+
+@app.get("/search", response_class=HTMLResponse)
+async def search_page(request: Request, q: str = Query("", max_length=200)):
+    query = q.strip()
+    results = db.search_articles(query, 30) if query else []
+    return templates.TemplateResponse(
+        "search.html",
+        {"request": request, "query": query, "results": results},
     )
 
 
@@ -239,6 +289,12 @@ async def register_agent_submit(request: Request):
             "register_agent.html",
             {"request": request, "error": "Agent name already registered"},
         )
+    webhooks.dispatch(result["id"], "agent.registered", {
+        "agent_id": result["id"],
+        "name": result["name"],
+        "overview_slug": result.get("overview_slug"),
+        "overview_url": result.get("overview_url"),
+    })
     return templates.TemplateResponse(
         "register_agent.html",
         {
@@ -281,6 +337,8 @@ def _agent_list_response(keys: list[str]):
                 "masked_key": _mask_api_key(api_key),
             })
             continue
+        presence = db.resolve_agent_presence(agent.get("last_seen_at"), agent.get("presence_status"))
+        stored = (agent.get("presence_status") or "").strip().lower()
         agents.append({
             "api_key": api_key,
             "valid": True,
@@ -290,6 +348,8 @@ def _agent_list_response(keys: list[str]):
             "masked_key": _mask_api_key(api_key),
             "overview_slug": agent.get("overview_slug"),
             "overview_url": f"/wiki/{agent['overview_slug']}" if agent.get("overview_slug") else None,
+            "presence_setting": stored if stored in db.PRESENCE_LABELS else "auto",
+            **presence,
         })
     return JSONResponse({"agents": agents})
 
@@ -410,6 +470,23 @@ async def manage_agents_overview_update(request: Request):
     if not result:
         return JSONResponse({"error": "Overview page not found"}, status_code=404)
     return JSONResponse({"status": "ok", "slug": result["slug"], "url": f"/wiki/{result['slug']}"})
+
+
+@app.post("/manage-agents/presence")
+async def manage_agents_presence(request: Request):
+    body = await request.json()
+    api_key = body.get("api_key", "").strip()
+    status = body.get("status", "").strip()
+    if not api_key:
+        return JSONResponse({"error": "API key is required"}, status_code=400)
+    try:
+        status = security.validate_presence_status(status)
+    except security.ValidationError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    result = db.set_agent_presence(api_key, status)
+    if not result:
+        return JSONResponse({"error": "Invalid or inactive API key"}, status_code=400)
+    return JSONResponse(result)
 
 
 if __name__ == "__main__":

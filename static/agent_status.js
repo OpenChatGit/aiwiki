@@ -1,6 +1,5 @@
 (function () {
-  var POLL_MS = 10000;
-  var MAX_SIDEBAR = 8;
+  var POLL_MS = 5000;
   var listEl = document.getElementById("agent-status-list");
   var footerEl = document.getElementById("agent-status-footer");
   if (!listEl) return;
@@ -11,36 +10,16 @@
     return div.innerHTML;
   }
 
-  function timeAgo(iso) {
-    if (!iso) return "";
-    var now = Date.now();
-    var then = new Date(iso).getTime();
-    var diff = Math.floor((now - then) / 1000);
-    if (diff < 0) return "just now";
-    if (diff < 60) return diff + "s ago";
-    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
-    if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
-    return Math.floor(diff / 86400) + "d ago";
-  }
-
   function renderAgent(agent) {
     var li = document.createElement("li");
-    var statusClass = agent.online ? "online" : "offline";
-    var statusLabel = agent.online ? "Online" : "Offline";
-    var ago = agent.builtin ? "" : timeAgo(agent.last_seen_at);
-    var agoHtml = ago ? ' <span class="agent-ago">' + ago + "</span>" : "";
-    var nameHtml;
-    if (agent.builtin) {
-      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-        '<a href="' + escapeHtml(agent.overview_url || '/agents') + '">' + escapeHtml(agent.name) + '</a>';
-    } else if (agent.overview_url) {
-      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-        '<a href="' + escapeHtml(agent.overview_url) + '">' + escapeHtml(agent.name) + '</a>' + agoHtml;
-    } else {
-      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-        escapeHtml(agent.name) + agoHtml;
-    }
-    li.innerHTML = nameHtml;
+    var statusClass = agent.presence || (agent.online ? "active" : "offline");
+    var statusLabel = agent.presence_label || (agent.online ? "Active" : "Offline");
+    var nameHtml = agent.overview_url
+      ? "<a href=\"" + escapeHtml(agent.overview_url) + "\">" + escapeHtml(agent.name) + "</a>"
+      : escapeHtml(agent.name);
+    li.innerHTML =
+      '<span class="agent-indicator ' + statusClass + '" title="' + escapeHtml(statusLabel) + '"></span> ' +
+      nameHtml;
     return li;
   }
 
@@ -54,18 +33,18 @@
       return;
     }
 
-    var shown = agents.slice(0, MAX_SIDEBAR);
+    var shown = agents.slice(0, 8);
     shown.forEach(function (agent) {
       listEl.appendChild(renderAgent(agent));
     });
 
     if (footerEl) {
-      footerEl.hidden = agents.length <= MAX_SIDEBAR;
+      footerEl.hidden = agents.length <= 8;
     }
   }
 
   function refresh() {
-    fetch("/api/v1/agents/status")
+    fetch("/api/v1/agents/status", { cache: "no-store", headers: { Accept: "application/json" } })
       .then(function (r) { return r.json(); })
       .then(renderAgents)
       .catch(function () {
@@ -76,4 +55,7 @@
 
   refresh();
   setInterval(refresh, POLL_MS);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") refresh();
+  });
 })();
