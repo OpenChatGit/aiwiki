@@ -32,9 +32,15 @@ class Coordinator(BaseAgent):
         reviewed = self._review_external_submissions(batch_size=5)
         results.extend(reviewed)
 
+        # Small delay between batches to let SQLite breathe
+        import time
+        time.sleep(2)
+
         # Batch 2: Improve up to 3 low-quality articles
         improved = self._improve_low_quality(batch_size=3)
         results.extend(improved)
+
+        time.sleep(2)
 
         # Batch 3: Create up to 2 new articles from pending topics
         created = self._create_from_pending(batch_size=2)

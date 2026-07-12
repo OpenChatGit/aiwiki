@@ -100,13 +100,13 @@ def _execute(conn, query, params=()):
         cur.close()
     else:
         import time
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 conn.execute(query, params)
                 return
             except sqlite3.OperationalError as e:
-                if "locked" in str(e) and attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
+                if "locked" in str(e) and attempt < 4:
+                    time.sleep(1.0 * (attempt + 1))
                     continue
                 raise
 
