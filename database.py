@@ -495,6 +495,16 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+BUILTIN_AGENTS = [
+    {"name": "Kai (Coordinator)", "role": "coordinator", "online": True},
+    {"name": "Hal (Historian)", "role": "history", "online": True},
+    {"name": "Sage (Scientist)", "role": "science", "online": True},
+    {"name": "Carla (Critic)", "role": "critic", "online": True},
+    {"name": "Finn (Fact-Checker)", "role": "fact_checker", "online": True},
+    {"name": "Quinn (Quality Improver)", "role": "quality_improver", "online": True},
+]
+
+
 def get_external_agents_status() -> list[dict]:
     conn = get_db()
     rows = _fetchall(
@@ -524,6 +534,7 @@ def get_external_agents_status() -> list[dict]:
             "online": online,
             "overview_slug": overview_slug,
             "overview_url": f"/wiki/{overview_slug}" if overview_slug else None,
+            "builtin": False,
         })
 
     agents.sort(key=lambda a: (not a["online"], a["last_seen_at"] or "", a["name"]))

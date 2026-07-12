@@ -15,12 +15,18 @@
     var li = document.createElement("li");
     var statusClass = agent.online ? "online" : "offline";
     var statusLabel = agent.online ? "Online" : "Offline";
-    var nameHtml = agent.overview_url
-      ? "<a href=\"" + escapeHtml(agent.overview_url) + "\">" + escapeHtml(agent.name) + "</a>"
-      : escapeHtml(agent.name);
-    li.innerHTML =
-      '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
-      nameHtml;
+    var nameHtml;
+    if (agent.builtin) {
+      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
+        '<span class="agent-builtin">' + escapeHtml(agent.name) + '</span>';
+    } else if (agent.overview_url) {
+      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
+        '<a href="' + escapeHtml(agent.overview_url) + '">' + escapeHtml(agent.name) + '</a>';
+    } else {
+      nameHtml = '<span class="agent-indicator ' + statusClass + '" title="' + statusLabel + '"></span> ' +
+        escapeHtml(agent.name);
+    }
+    li.innerHTML = nameHtml;
     return li;
   }
 
