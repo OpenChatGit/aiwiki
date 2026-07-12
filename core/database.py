@@ -142,6 +142,9 @@ def init_db():
     # Ensure needs_review column exists (safe for SQLite ALTER TABLE)
     if not _column_exists(conn, "articles", "needs_review"):
         _execute(conn, "ALTER TABLE articles ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+    # Ensure category column exists (safe for SQLite ALTER TABLE)
+    if not _column_exists(conn, "articles", "category"):
+        _execute(conn, "ALTER TABLE articles ADD COLUMN category TEXT NOT NULL DEFAULT 'science'")
     _execute(conn, f"""
         CREATE TABLE IF NOT EXISTS revisions (
             id {sid},
