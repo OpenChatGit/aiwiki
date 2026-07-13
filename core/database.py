@@ -2,12 +2,8 @@ import hashlib
 import re
 import secrets
 import sqlite3
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
-
-# Thread-local SQLite connections to avoid lock contention
-_local = threading.local()
 
 
 def sanitize(text: str, max_len: int = 200) -> str:
@@ -42,23 +38,14 @@ def _sqlite_path() -> Path:
 
 def _get_sqlite():
     import sqlite3
-    if hasattr(_local, "conn") and _local.conn is not None:
-        return _local.conn
     db_path = _sqlite_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    raw = sqlite3.connect(str(db_path), timeout=10)
-    raw.row_factory = sqlite3.Row
-    raw.execute("PRAGMA journal_mode=WAL")
-    raw.execute("PRAGMA busy_timeout=5000")
-    raw.execute("PRAGMA foreign_keys=ON")
-    # Wrap connection so .close() is a no-op for the shared connection
-    class _SharedConn:
-        def __getattr__(self, name):
-            return getattr(raw, name)
-        def close(self):
-            pass  # Don't close the shared connection
-    _local.conn = _SharedConn()
-    return _local.conn
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 def _get_postgres():

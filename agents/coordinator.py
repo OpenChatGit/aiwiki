@@ -56,6 +56,7 @@ class Coordinator(BaseAgent):
 
     def _review_external_submissions(self) -> dict | None:
         """Review the oldest external agent submission."""
+        import time, random
         pending = db.get_articles_needing_review()
         if not pending:
             return None
@@ -67,6 +68,8 @@ class Coordinator(BaseAgent):
         self._track(self.critic.name, f"reviewing external: {full['title']}")
         critic_result = self.critic.act({"article": full})
         db.add_talk_message(full["id"], self.critic.name, critic_result["message"])
+
+        time.sleep(random.uniform(2.0, 5.0))
 
         self._track(self.fact_checker.name, f"fact-checking external: {full['title']}")
         fact_result = self.fact_checker.act({"article": full})
