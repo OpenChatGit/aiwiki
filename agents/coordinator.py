@@ -26,19 +26,7 @@ class Coordinator(BaseAgent):
 
     def act(self, context: dict) -> dict:
         self._track(self.name, "starting cycle")
-        # First priority: review external agent submissions
-        reviewed = self._review_external_submissions()
-        if reviewed:
-            self._track(self.name, f"reviewed external: {reviewed.get('slug', 'unknown')}")
-            return reviewed
-
-        # Second priority: improve existing low-quality articles
-        improved = self._improve_low_quality()
-        if improved:
-            self._track(self.name, f"improved article: {improved.get('slug', 'unknown')}")
-            return improved
-
-        # Third priority: pick from pending See also topics
+        # First priority: pick from pending See also topics
         pending = db.pop_pending_topic()
         if pending:
             topic, category = pending
