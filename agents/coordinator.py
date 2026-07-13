@@ -25,32 +25,49 @@ class Coordinator(BaseAgent):
             pass
 
     def act(self, context: dict) -> dict:
-        self._track(self.name, "starting cycle")
-        # First priority: improve existing low-quality articles
+        results = []
+        import time as _time
+
+        # Step 1: Review external agent submissions
+        reviewed = self._review_external_submissions()
+        if reviewed:
+            self._track(self.name, f"reviewed external: {reviewed.get('slug', 'unknown')}")
+            results.append(reviewed)
+            _time.sleep(3.0)
+
+        # Step 2: Improve existing low-quality articles
         improved = self._improve_low_quality()
         if improved:
             self._track(self.name, f"improved article: {improved.get('slug', 'unknown')}")
-            return improved
+            results.append(improved)
+            _time.sleep(3.0)
 
-        # Second priority: pick from pending See also topics
+        # Step 3: Create a new article
         pending = db.pop_pending_topic()
         if pending:
             topic, category = pending
             existing = db.get_article(db.slugify(topic))
             if existing:
-                return self._review_existing(existing)
-            return self._create_new(topic, category)
+                result = self._review_existing(existing)
+            else:
+                result = self._create_new(topic, category)
+        else:
+            topic, category = pick_topic()
+            existing = db.get_article(db.slugify(topic))
+            if existing:
+                result = self._review_existing(existing)
+            else:
+                result = self._create_new(topic, category)
+        if result:
+            results.append(result)
 
-        # Otherwise pick from the static topic list
-        topic, category = pick_topic()
-        existing = db.get_article(db.slugify(topic))
-        if existing:
-            return self._review_existing(existing)
-        return self._create_new(topic, category)
+        if results:
+            return {"action": "multi", "steps": results}
+        return {"action": "noop", "reason": "nothing to do"}
 
     def _review_external_submissions(self) -> dict | None:
         """Review the oldest external agent submission."""
-        import time, random
+        import time, random, sqlite3
         pending = db.get_articles_needing_review()
         if not pending:
             return None
@@ -59,29 +76,39 @@ class Coordinator(BaseAgent):
         if not full:
             return None
 
-        self._track(self.critic.name, f"reviewing external: {full['title']}")
+        # Track + run critic (no lock held during LLM call)
+        db.update_agent_activity(self.critic.name, f"reviewing external: {full['title']}")
         critic_result = self.critic.act({"article": full})
-        db.add_talk_message(full["id"], self.critic.name, critic_result["message"])
 
-        time.sleep(random.uniform(2.0, 5.0))
-
-        self._track(self.fact_checker.name, f"fact-checking external: {full['title']}")
+        # Track + run fact-checker
+        db.update_agent_activity(self.fact_checker.name, f"fact-checking external: {full['title']}")
         fact_result = self.fact_checker.act({"article": full})
-        db.add_talk_message(full["id"], self.fact_checker.name, fact_result["message"])
 
-        db.clear_needs_review(full["id"])
-        db.log_agent_action(self.name, "review_external", full["id"], full["title"])
+        import time as _time
+        _time.sleep(0.5)  # Let SQLite settle
 
-        if critic_result.get("needs_revision") or fact_result.get("has_issues"):
-            db.add_talk_message(
-                full["id"], self.name,
-                "Review complete. Some issues were flagged. The article author has been notified."
-            )
-        else:
-            db.add_talk_message(
-                full["id"], self.name,
-                "Review complete. No significant issues found. Article is published."
-            )
+        # All writes in one connection (no LLM calls, so no lock contention)
+        conn = db.get_db()
+        try:
+            p = "?"
+            ts = db.now()
+            conn.execute(f"INSERT INTO talk_messages (article_id, agent_name, message, parent_id, timestamp) VALUES ({p}, {p}, {p}, {p}, {p})",
+                (full["id"], self.critic.name, critic_result["message"], None, ts))
+            conn.execute(f"INSERT INTO talk_messages (article_id, agent_name, message, parent_id, timestamp) VALUES ({p}, {p}, {p}, {p}, {p})",
+                (full["id"], self.fact_checker.name, fact_result["message"], None, ts))
+            conn.execute(f"UPDATE articles SET needs_review = 0 WHERE id = {p}", (full["id"],))
+            conn.execute(f"INSERT INTO agent_logs (agent_name, action, article_id, details, timestamp) VALUES ({p}, {p}, {p}, {p}, {p})",
+                (self.name, "review_external", full["id"], full["title"], ts))
+
+            if critic_result.get("needs_revision") or fact_result.get("has_issues"):
+                conn.execute(f"INSERT INTO talk_messages (article_id, agent_name, message, parent_id, timestamp) VALUES ({p}, {p}, {p}, {p}, {p})",
+                    (full["id"], self.name, "Review complete. Some issues were flagged. The article author has been notified.", None, ts))
+            else:
+                conn.execute(f"INSERT INTO talk_messages (article_id, agent_name, message, parent_id, timestamp) VALUES ({p}, {p}, {p}, {p}, {p})",
+                    (full["id"], self.name, "Review complete. No significant issues found. Article is published.", None, ts))
+            conn.commit()
+        finally:
+            conn.close()
 
         return {"action": "reviewed_external", "article_id": full["id"], "slug": full["slug"]}
 
@@ -102,6 +129,17 @@ class Coordinator(BaseAgent):
                 continue
             word_count = len(full["content"].split())
             section_count = full["content"].count("## ")
+
+            # Skip articles Quinn already improved recently (within last hour)
+            from datetime import datetime, timezone
+            updated = full.get("updated_at", "")
+            if updated:
+                try:
+                    updated_dt = datetime.fromisoformat(updated)
+                    if (datetime.now(timezone.utc) - updated_dt).total_seconds() < 3600:
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             talk_messages = db.get_talk_messages(full["id"])
             has_unresolved = any(

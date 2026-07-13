@@ -42,9 +42,13 @@ def _get_sqlite():
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Only set WAL mode if not already set (avoids exclusive lock on every connect)
+    cur = conn.execute("PRAGMA journal_mode")
+    if cur.fetchone()[0] != "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()  # Clear implicit transaction from PRAGMAs
     return conn
 
 
@@ -118,8 +122,16 @@ def _execute_returning(conn, query, params=()):
         row = cur.fetchone()
         cur.close()
         return row[0] if row else None
-    cur = conn.execute(query, params)
-    return cur.lastrowid
+    import time
+    for attempt in range(5):
+        try:
+            cur = conn.execute(query, params)
+            return cur.lastrowid
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < 4:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
 
 
 def _param_style():
@@ -542,8 +554,10 @@ def get_revision(revision_id: int) -> dict | None:
     return row
 
 
-def add_talk_message(article_id: int, agent_name: str, message: str, parent_id: int | None = None) -> int:
-    conn = get_db()
+def add_talk_message(article_id: int, agent_name: str, message: str, parent_id: int | None = None, conn=None) -> int:
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db()
     ts = now()
     agent_name = sanitize(agent_name)
     message = sanitize(message, max_len=5000)
@@ -552,8 +566,9 @@ def add_talk_message(article_id: int, agent_name: str, message: str, parent_id: 
     msg_id = _execute_returning(
         conn, f"INSERT INTO talk_messages (article_id, agent_name, message, parent_id, timestamp) VALUES ({p}, {p}, {p}, {p}, {p}){returning}",
         (article_id, agent_name, message, parent_id, ts))
-    conn.commit()
-    conn.close()
+    if own_conn:
+        conn.commit()
+        conn.close()
     return msg_id
 
 
